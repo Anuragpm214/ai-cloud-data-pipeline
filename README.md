@@ -1,23 +1,98 @@
 # AI-Powered Cloud Data Pipeline
 
-A runnable local demonstration of file ingestion, asynchronous ETL, PyTorch inference, and AWS-style storage using FastAPI, S3, SQS, DynamoDB, and LocalStack.
+An end-to-end data pipeline that accepts structured files (CSV, JSON, Parquet) and unstructured text, cleans and transforms them, runs PyTorch inference, and returns tracked results through REST APIs. FastAPI handles ingestion, SQS separates uploads from background processing, S3 stores raw and processed datasets, and DynamoDB stores job status and predictions.
 
-**Model scope:** the neural networks use seeded, untrained demo weights. Their risk/sentiment labels and confidence scores demonstrate plumbing, not accurate predictions. No trained checkpoints or labeled training data are supplied. This is a local development project, not an authenticated production service.
+The project runs locally with Docker Compose and LocalStack, which emulates AWS services. It demonstrates asynchronous ETL, inference integration, job tracking, and retry handling.
+
+> **Model scope:** The PyTorch models use seeded, untrained demo weights. Risk and sentiment predictions demonstrate the workflow; they are not validated model results.
+
+## Complete architecture
 
 ```mermaid
-flowchart LR
-    Client --> Ingestion[FastAPI :8000]
-    Ingestion --> Raw[S3 raw files]
-    Ingestion --> Jobs[DynamoDB jobs]
-    Ingestion --> Queue[SQS]
-    Queue --> Worker[ETL worker]
-    Raw --> Worker
-    Worker --> Processed[S3 Parquet / JSON]
-    Worker --> Inference[PyTorch API :8001]
-    Processed --> Inference
-    Inference --> Predictions[DynamoDB predictions]
-    Inference --> Jobs
+flowchart TD
+    Client["Client / Swagger UI / Demo script"]
+    API["FastAPI Ingestion API :8000"]
+
+    subgraph Storage["AWS services emulated by LocalStack"]
+        Raw[("S3: raw-data-bucket")]
+        Queue["SQS: data-processing-queue"]
+        DLQ["SQS: data-processing-dlq"]
+        Processed[("S3: processed-data-bucket")]
+        Jobs[("DynamoDB: PipelineJobs")]
+        Predictions[("DynamoDB: ModelPredictions")]
+    end
+
+    Worker["Python ETL worker"]
+    Type{"Dataset type"}
+    Tabular["Validate table, normalize headers,<br/>impute missing values → Parquet"]
+    Text["Validate UTF-8, normalize whitespace,<br/>split sentences → JSON"]
+    AI["FastAPI PyTorch Inference API :8001"]
+
+    Client -->|"1a. Multipart upload"| API
+    API -->|"Store direct upload"| Raw
+    Client -->|"1b. Request presigned URL"| API
+    API -->|"Return signed PUT URL and job ID"| Client
+    Client -->|"PUT file using signed URL"| Raw
+    Client -->|"Confirm presigned upload"| API
+    API -->|"2. Register job before queue publication"| Jobs
+    API -->|"3. Publish processing event"| Queue
+    Queue -->|"4. Poll message"| Worker
+    Raw -->|"5. Download dataset"| Worker
+    Worker --> Type
+    Type -->|"Structured"| Tabular
+    Type -->|"Text"| Text
+    Tabular -->|"6. Store transformed data"| Processed
+    Text -->|"6. Store transformed data"| Processed
+    Worker -->|"Status, profile, transformation metrics"| Jobs
+    Worker -->|"7. Call batch inference"| AI
+    Processed -->|"8. Read processed dataset"| AI
+    AI -->|"9. Save labels and confidence scores"| Predictions
+    AI -->|"10. Mark INFERENCE_COMPLETED"| Jobs
+    Worker -->|"11. Delete message after success"| Queue
+    Queue -->|"Repeated processing failures"| DLQ
+    Client -->|"12. GET job status and results"| API
+    Jobs -->|"Job details"| API
+    Predictions -->|"Predictions by job ID"| API
 ```
+
+The Compose setup uses a polling worker and explicit API-to-SQS publication. The optional Lambda adapter is available for AWS event integration; Lambda is not running in the local demo.
+
+## Pipeline walkthrough
+
+| Stage | What happens | Output |
+|---|---|---|
+| 1. Ingest | Upload through FastAPI, or PUT to S3 with a presigned URL and confirm completion. | Raw file and unique `job_id` |
+| 2. Schedule | Register the job in DynamoDB before sending its details to SQS. | Queued processing event |
+| 3. Validate | Worker downloads the file and checks tabular content or UTF-8 text. | Data profile or recorded error |
+| 4. Transform | Clean structured data or normalize and chunk text. | Parquet for tables; JSON for text |
+| 5. Store | Save the transformed dataset and update job metrics. | `processed_s3_uri`, record count, `TRANSFORMED` status |
+| 6. Infer | Read processed data and run the tabular or text PyTorch model. | One prediction per row or text chunk |
+| 7. Persist | Store predictions in DynamoDB and complete the job. | `INFERENCE_COMPLETED` and prediction count |
+| 8. Retrieve | Query the job API using its ID. | Status, metadata, and predictions |
+
+### Job lifecycle and failures
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: Presigned URL requested
+    PENDING --> UPLOADED: File confirmed in S3
+    [*] --> UPLOADED: Direct upload registered
+    UPLOADED --> PROCESSING: Worker receives event
+    PROCESSING --> TRANSFORMED: ETL output stored
+    TRANSFORMED --> INFERENCE_COMPLETED: Predictions stored
+    PROCESSING --> FAILED: Validation or transformation error
+    TRANSFORMED --> FAILED: Inference request fails
+    FAILED --> PROCESSING: Queued worker retry
+    INFERENCE_COMPLETED --> [*]
+```
+
+Worker failures leave the SQS message available for retry and record the error on the job. The local queue moves repeatedly failing messages to a dead-letter queue after five receives. Completed jobs are skipped on redelivery. Queue-publication failures are reported by the API; they do not have a queued message to retry automatically.
+
+### Example results
+
+- **Structured sample:** 5 CSV rows → Parquet dataset → 5 demo risk predictions.
+- **Text sample:** 4 sentence chunks → JSON dataset → 4 demo sentiment predictions.
+- **Result endpoint:** `GET /api/v1/jobs/{job_id}` returns file locations, job status, validation metrics, and predictions.
 
 ## Run locally
 
