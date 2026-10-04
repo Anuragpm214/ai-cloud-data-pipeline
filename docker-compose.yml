@@ -1,0 +1,90 @@
+services:
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: localstack_aws
+    ports:
+      - "4566:4566"
+    environment:
+      - AWS_DEFAULT_REGION=us-east-1
+      - SQS_ENDPOINT_STRATEGY=path
+    volumes:
+      - "./infrastructure/localstack_init:/etc/localstack/init/ready.d"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://localhost:4566/_localstack/init/ready')); assert d['completed'] and all(s['state'] == 'SUCCESSFUL' for s in d['scripts'])"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ingestion-api:
+    build:
+      context: ./services/ingestion_api
+      dockerfile: Dockerfile
+    container_name: ingestion_api_service
+    ports:
+      - "8000:8000"
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - S3_PUBLIC_ENDPOINT_URL=http://localhost:4566
+      - S3_RAW_BUCKET=raw-data-bucket
+      - S3_PROCESSED_BUCKET=processed-data-bucket
+      - DYNAMODB_JOB_TABLE=PipelineJobs
+      - SQS_QUEUE_URL=http://localstack:4566/000000000000/data-processing-queue
+      - AI_INFERENCE_URL=http://ai-inference:8001
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ai-inference:
+    build:
+      context: ./services/ai_inference
+      dockerfile: Dockerfile
+    container_name: ai_inference_service
+    ports:
+      - "8001:8001"
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - S3_PROCESSED_BUCKET=processed-data-bucket
+      - DYNAMODB_PREDICTIONS_TABLE=ModelPredictions
+    depends_on:
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  pipeline-worker:
+    build:
+      context: ./services/pipeline_worker
+      dockerfile: Dockerfile
+    container_name: pipeline_worker_service
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - S3_RAW_BUCKET=raw-data-bucket
+      - S3_PROCESSED_BUCKET=processed-data-bucket
+      - DYNAMODB_JOB_TABLE=PipelineJobs
+      - SQS_QUEUE_URL=http://localstack:4566/000000000000/data-processing-queue
+      - AI_INFERENCE_URL=http://ai-inference:8001
+    depends_on:
+      localstack:
+        condition: service_healthy
+      ai-inference:
+        condition: service_healthy

@@ -1,0 +1,4 @@
+Antigravity Cloud Pipeline delivers high throughput and resilient data processing.
+The event driven architecture decouples ingestion from heavy compute tasks.
+PyTorch inference models run efficiently across distributed containerized clusters.
+Real-time monitoring and metadata tracking are persisted seamlessly in AWS DynamoDB.
